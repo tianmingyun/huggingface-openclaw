@@ -1,0 +1,34 @@
+name: Sync to HuggingFace Space
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Push to HuggingFace Space
+        env:
+          HF_SYNC_TOKEN: ${{ secrets.HF_SYNC_TOKEN }}
+          HF_USER: ${{ secrets.HF_USER }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
+        run: |
+          if [ -z "$HF_SYNC_TOKEN" ] || [ -z "$HF_USER" ] || [ -z "$HF_SPACE" ]; then
+            echo "Error: Missing required secrets (HF_SYNC_TOKEN, HF_USER, or HF_SPACE)"
+            exit 1
+          fi
+          git remote add hf https://${HF_USER}:${HF_SYNC_TOKEN}@huggingface.co/spaces/${HF_USER}/${HF_SPACE}
+          git push hf main --force
+          echo "Successfully synced to HuggingFace Space: ${HF_USER}/${HF_SPACE}"

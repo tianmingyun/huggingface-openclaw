@@ -1,0 +1,41 @@
+# Logs
+logs*.txt
+*.log
+npm-debug.log*
+
+# Dependencies
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env files (sensitive) - IMPORTANT
+.env
+.env.local
+.env.*.local
+env.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+.venv/
+venv/
+
+# Build artifacts
+dist/
+build/
+*.tar.gz
+
+# Test
+coverage/
+.nyc_output/
