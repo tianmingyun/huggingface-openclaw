@@ -1,7 +1,7 @@
 FROM node:22-slim
 
 LABEL description="OpenClaw Multi-Agent for HuggingFace Space"
-LABEL version="2026.2.23"
+LABEL version="2026.2.26"
 
 # 1. System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,7 +17,7 @@ RUN update-ca-certificates && \
 
 # 3. Install dependencies at build time
 RUN npm install -g @larksuiteoapi/node-sdk --unsafe-perm && \
-    npm install -g openclaw@2026.2.21 --unsafe-perm
+    npm install -g openclaw@2026.2.26 --unsafe-perm
 
 # 4. Copy nano-banana-pro skill from local files
 COPY skills/nano-banana-pro /home/node/.openclaw/skills/nano-banana-pro
@@ -111,6 +111,9 @@ RUN cat << 'STARTEOF' > /usr/local/bin/start-openclaw
 #!/bin/bash
 set -e
 
+# Image model with fallback (allow external override)
+export IMAGE_MODEL="${IMAGE_MODEL:-imagen-4.0-generate-001}"
+
 BASE="/home/node/.openclaw"
 
 echo "=== OpenClaw Multi-Agent Gateway Starting ==="
@@ -145,10 +148,26 @@ mkdir -p "$BASE/agents/designer"
 # Ensure skills directory exists with correct permissions
 mkdir -p "$BASE/skills"
 mkdir -p "$BASE/workspace-designer/skills"
+mkdir -p "$BASE/workspace-designer/memory"
+mkdir -p "$BASE/workspace-designer/output"
 
-# Link skill to designer workspace
-ln -sf "$BASE/skills/nano-banana-pro" "$BASE/workspace-designer/nano-banana-pro"
-echo "--- Linked nano-banana-pro to designer workspace ---"
+# Copy skill to designer workspace (copy instead of symlink for security compatibility)
+rm -rf "$BASE/workspace-designer/skills/nano-banana-pro"
+cp -r "$BASE/skills/nano-banana-pro" "$BASE/workspace-designer/skills/nano-banana-pro"
+echo "--- Skill copied to designer workspace ---"
+
+# Link designer output to canvas for web access
+mkdir -p "$BASE/canvas"
+rm -f "$BASE/canvas/output"
+ln -sf "$BASE/workspace-designer/output" "$BASE/canvas/output"
+echo "--- Designer output linked to canvas ---"
+
+# Verify skill is properly copied
+if [ -d "$BASE/workspace-designer/skills/nano-banana-pro" ]; then
+  echo "--- Skill copied to designer workspace: OK ---"
+else
+  echo "--- WARNING: Skill not copied to designer workspace ---"
+fi
 
 # Verify nano-banana-pro skill scripts exist
 if [ ! -d "$BASE/skills/nano-banana-pro/scripts" ]; then
@@ -202,6 +221,41 @@ Action: Use sessions_spawn to create a session for coder with the task.
 - Always wait for specialist to complete and report back
 EOF
 
+# Assistant AGENTS.md - Operational rules
+cat > "$BASE/workspace-assistant/AGENTS.md" << 'EOF'
+# Assistant Agent Rules
+
+## Delegation
+- Use sessions_spawn to delegate tasks to subagents
+- targetAgent="coder" for coding tasks
+- targetAgent="designer" for image generation tasks
+
+## Critical Safety Rules
+- **NEVER** attempt to restart, stop, or manage the `openclaw gateway` service.
+- If a subagent fails to spawn (e.g., pairing error), report the status to the user and ask for authorization if needed.
+- Do NOT assume port conflicts require a service restart.
+
+## Workflow
+1. Understand user request
+2. Delegate to specialist (coder/designer)
+3. **WAIT** for the specialist to complete the task. Do NOT try to message the specialist directly to check progress. Wait for the automated report.
+4. Report the final result (including images/code) back to the user.
+EOF
+
+# Assistant TOOLS.md - Tool documentation
+cat > "$BASE/workspace-assistant/TOOLS.md" << 'EOF'
+# Available Tools
+
+## sessions_spawn
+- Spawn subagent sessions for specialized tasks
+
+## sessions_send
+- Send messages to existing subagent sessions
+
+## Other Tools
+- read, write, edit, exec, message, etc.
+EOF
+
 # Agent 2: Coder (Engineer)
 cat > "$BASE/workspace-coder/SOUL.md" << 'EOF'
 # Identity
@@ -214,6 +268,34 @@ You specialize in writing clean, efficient code.
 - You receive tasks from Team Leader via sessions_send
 - Deliver working, well-commented code
 - Report completion back to Team Leader
+EOF
+
+# Coder AGENTS.md - Operational rules
+cat > "$BASE/workspace-coder/AGENTS.md" << 'EOF'
+# Coder Agent Rules
+
+## Your Task
+Write code when requested by the Team Leader.
+
+## Workflow
+1. Receive task from Team Leader via sessions_send
+2. Understand requirements
+3. Write clean, efficient code
+4. Test if possible
+5. Report completion
+EOF
+
+# Coder TOOLS.md - Tool documentation
+cat > "$BASE/workspace-coder/TOOLS.md" << 'EOF'
+# Available Tools
+
+## Code Tools
+- write: Write code files
+- edit: Edit existing code
+- exec: Run commands
+
+## Other Tools
+- read, message, etc.
 EOF
 
 # Agent 3: Designer (Creator with image generation skill)
@@ -230,6 +312,7 @@ When asked to generate an image:
 1. Look for the nano-banana-pro skill in your available tools
 2. Use the skill with a clear prompt describing the image
 3. The skill will generate and return the image
+4. **IMPORTANT**: If generation fails, the script will output an error image. Always use the provided output path.
 
 # Example prompts
 - "A cute cat sitting on a windowsill"
@@ -240,6 +323,78 @@ When asked to generate an image:
 - Always try to use nano-banana-pro skill for image requests
 - Provide detailed, creative prompts
 - Report the result back to the user
+EOF
+
+# Setup external URL for Canvas (HARDCODED for stability)
+EXTERNAL_URL="https://tianmingyun999-openclaw.hf.space"
+echo "--- EXTERNAL_URL set to: $EXTERNAL_URL ---"
+
+# Designer AGENTS.md - Operational rules (subagent can see this)
+cat > "$BASE/workspace-designer/AGENTS.md" << EOF
+# Designer Agent Rules
+
+## Your Task
+Generate images using the nano-banana-pro skill when requested.
+
+## How to Generate Images (IMPORTANT!)
+Use exec tool to run the generate_image.py script directly:
+
+1. When user requests an image, use exec tool to run:
+\`\`\`
+uv run /home/node/.openclaw/skills/nano-banana-pro/scripts/generate_image.py --prompt "your image description" --filename "output/output.png" --resolution 1K
+\`\`\`
+
+2. The image will be generated at /home/node/.openclaw/workspace-designer/output/output.png
+
+3. **To send the image to the user**, you MUST follow these 3 steps:
+   
+   a. **Copy to allowed media directory** (for upload):
+      \`\`\`
+      cp /home/node/.openclaw/workspace-designer/output/output.png /tmp/output.png
+      \`\`\`
+      
+   b. **Copy to canvas directory** (for public URL):
+      \`\`\`
+      cp /home/node/.openclaw/workspace-designer/output/output.png /home/node/.openclaw/canvas/output/output.png
+      \`\`\`
+
+   c. **Send message with BOTH media and URL**:
+      \`\`\`
+      message channel=feishu target=<user_id> message="Here is your image. Link: ${EXTERNAL_URL}/__openclaw__/canvas/output/output.png" media=/tmp/output.png
+      \`\`\`
+   
+   IMPORTANT: 
+   - You MUST copy to /tmp/ first (for upload)
+   - You MUST copy to /home/node/.openclaw/canvas/output/ (for URL link)
+   - Use BOTH media parameter AND the URL in the message text
+   - Do NOT use Markdown image links (![image](url))
+
+## Example
+User: "Draw a cat"
+Action:
+1. Run script (saving to output/output.png).
+2. Wait for completion.
+3. Copy to /tmp: cp /home/node/.openclaw/workspace-designer/output/output.png /tmp/output.png
+4. Copy to canvas: cp /home/node/.openclaw/workspace-designer/output/output.png /home/node/.openclaw/canvas/output/output.png
+5. Send: message channel=feishu target=<user_id> message="Image generated. Link: ${EXTERNAL_URL}/__openclaw__/canvas/output/output.png" media=/tmp/output.png
+EOF
+
+# Designer TOOLS.md - Tool documentation (subagent can see this)
+cat > "$BASE/workspace-designer/TOOLS.md" << 'EOF'
+# Available Tools
+
+## Image Generation
+Use exec tool to run the image generation script:
+```
+uv run /home/node/.openclaw/skills/nano-banana-pro/scripts/generate_image.py --prompt "描述" --filename "output/output.png" --resolution 1K
+```
+
+## Other Available Tools
+- read: Read files
+- write: Write files  
+- edit: Edit files
+- exec: Execute commands
+- message: Send messages
 EOF
 
 # ==========================================
@@ -258,7 +413,10 @@ export OPENCLAW_HOME="$BASE"
 export OPENCLAW_CONFIG_PATH="$BASE/openclaw.json"
 
 # Default model fallback
-export MODEL="${MODEL:-gemini-1.5-flash}"
+export MODEL="${MODEL:-gemini-2.0-flash}"
+
+# Image generation model for nano-banana-pro skill
+export IMAGE_MODEL="${IMAGE_MODEL:-imagen-4.0-generate-001}"
 
 # Logging configuration - output to stdout for HF Space
 export OPENCLAW_LOG_LEVEL="${OPENCLAW_LOG_LEVEL:-info}"
@@ -301,17 +459,18 @@ cat > "$BASE/openclaw.json" << JSONEOF
         "enabled": true,
         "apiKey": "${GEMINI_API_KEY}",
         "env": {
-          "GEMINI_API_KEY": "${GEMINI_API_KEY}"
+          "GEMINI_API_KEY": "${GEMINI_API_KEY}",
+          "IMAGE_MODEL": "${IMAGE_MODEL:-imagen-4.0-generate-001}"
         }
       }
     }
   },
-  "tools": {
+    "tools": {
     "agentToAgent": {
       "enabled": true,
       "allow": ["assistant", "coder", "designer"]
     },
-    "allow": ["exec", "read", "write", "edit", "apply_patch", "process", "bash", "skills", "skill", "sessions_spawn", "sessions_send", "sessions_list"],
+    "allow": ["exec", "read", "write", "edit", "process", "bash", "sessions_spawn", "sessions_send", "sessions_list", "message"],
     "deny": ["gateway", "cron"],
     "elevated": {
       "enabled": true,
@@ -449,7 +608,8 @@ cat > "$BASE/openclaw.json" << JSONEOF
     "controlUi": {
       "enabled": true,
       "allowInsecureAuth": true,
-      "dangerouslyDisableDeviceAuth": true
+      "dangerouslyDisableDeviceAuth": true,
+      "dangerouslyAllowHostHeaderOriginFallback": true
     },
     "tools": {
       "deny": ["gateway"]
@@ -516,11 +676,80 @@ if [ -d "$BASE/skills/nano-banana-pro" ]; then
 else
   echo "--- WARNING: nano-banana-pro skill NOT found ---"
 fi
-if [ -L "$BASE/workspace-designer/skills/nano-banana-pro" ]; then
-  echo "--- Skill linked to designer workspace: OK ---"
+if [ -d "$BASE/workspace-designer/skills/nano-banana-pro" ]; then
+  echo "--- Skill copied to designer workspace: OK ---"
 else
-  echo "--- WARNING: Skill not linked to designer workspace ---"
+  echo "--- WARNING: Skill not copied to designer workspace ---"
 fi
+
+# ==========================================
+# Dynamic Configuration (Runtime)
+# ==========================================
+
+# Setup external URL for Canvas
+# Note: SPACE_HOST is not used to avoid config errors. URL is hardcoded.
+EXTERNAL_URL="https://tianmingyun999-openclaw.hf.space"
+echo "--- EXTERNAL_URL set to: $EXTERNAL_URL ---"
+
+echo "--- Generating Runtime Designer Configuration ---"
+cat > "$BASE/workspace-designer/AGENTS.md" << AGENTEOF
+# Designer Agent Rules
+
+## Your Task
+Generate images using the nano-banana-pro skill when requested.
+
+## Model Information
+- **Skill**: nano-banana-pro
+- **Model**: ${IMAGE_MODEL:-imagen-4.0-generate-001}
+- **Type**: Image Generation Model (Text-to-Image)
+
+## Prompting Guide
+- Use clear, descriptive prompts in English.
+- Focus on visual elements, style, lighting, and composition.
+- Avoid conversational filler; be direct.
+
+## How to Generate Images (IMPORTANT!)
+Use exec tool to run the generate_image.py script directly:
+
+1. When user requests an image, use exec tool to run:
+\`\`\`
+uv run /home/node/.openclaw/skills/nano-banana-pro/scripts/generate_image.py --prompt "your image description" --filename "output/output.png" --resolution 1K
+\`\`\`
+
+2. The image will be generated at /home/node/.openclaw/workspace-designer/output/output.png
+
+3. **To send the image to the user**, you MUST follow these 3 steps:
+   
+   a. **Copy to allowed media directory** (for upload):
+      \`\`\`
+      cp /home/node/.openclaw/workspace-designer/output/output.png /tmp/output.png
+      \`\`\`
+      
+   b. **Copy to canvas directory** (for public URL):
+      \`\`\`
+      cp /home/node/.openclaw/workspace-designer/output/output.png /home/node/.openclaw/canvas/output/output.png
+      \`\`\`
+
+   c. **Send message with BOTH media and URL**:
+      \`\`\`
+      message channel=feishu target=<user_id> message="Here is your image. Link: ${EXTERNAL_URL}/__openclaw__/canvas/output/output.png" media=/tmp/output.png
+      \`\`\`
+   
+   IMPORTANT: 
+   - You MUST copy to /tmp/ first (for upload)
+   - You MUST copy to /home/node/.openclaw/canvas/output/ (for URL link)
+   - Use BOTH media parameter AND the URL in the message text
+   - Do NOT use Markdown image links (![image](url))
+
+## Example
+User: "Draw a cat"
+Action:
+1. Run script (saving to output/output.png).
+2. Wait for completion.
+3. Copy to /tmp: cp /home/node/.openclaw/workspace-designer/output/output.png /tmp/output.png
+4. Copy to canvas: cp /home/node/.openclaw/workspace-designer/output/output.png /home/node/.openclaw/canvas/output/output.png
+5. Send: message channel=feishu target=<user_id> message="Image generated. Link: ${EXTERNAL_URL}/__openclaw__/canvas/output/output.png" media=/tmp/output.png
+AGENTEOF
 
 # Verbose mode for detailed logging
 VERBOSE_FLAG=""
@@ -528,6 +757,11 @@ if [ "${OPENCLAW_VERBOSE:-false}" = "true" ]; then
   VERBOSE_FLAG="--verbose"
   echo "--- Verbose mode enabled ---"
 fi
+
+# Kill any existing gateway process on port 7860 to avoid port conflicts
+echo "--- Checking for existing gateway processes ---"
+pkill -f "openclaw gateway" 2>/dev/null || true
+sleep 1
 
 # OpenClaw: use custom bind to 0.0.0.0 for HF Space
 # Version is auto-updated to latest at runtime
