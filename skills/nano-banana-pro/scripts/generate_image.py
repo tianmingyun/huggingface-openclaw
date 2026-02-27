@@ -16,11 +16,19 @@ Usage:
 import argparse
 import os
 import sys
-import base64
-import tempfile
+import time
+import signal
 from pathlib import Path
-from datetime import datetime
+from google import genai
+from google.genai import types
 
+# Set a global timeout of 60 seconds to prevent process hanging
+def timeout_handler(signum, frame):
+    print("Error: Script execution timed out (60s)", file=sys.stderr)
+    sys.exit(1)
+
+signal.signal(signal.SIGALRM, timeout_handler)
+signal.alarm(60)
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -41,6 +49,16 @@ def parse_args():
         choices=["1K", "2K", "4K"],
         default="1K",
         help="Output resolution (default: 1K)"
+    )
+    
+    # Get model from IMAGE_MODEL environment variable with fallback
+    # HARDCODED to ensure correct model is used despite env var issues
+    default_model = "imagen-4.0-generate-001"
+    
+    parser.add_argument(
+        "--model", "-m",
+        default=default_model,
+        help=f"Image generation model (default: {default_model})"
     )
     parser.add_argument(
         "--api-key",
@@ -87,9 +105,11 @@ def load_input_images(image_paths):
     return images
 
 
-def generate_image(prompt, api_key, resolution, input_images=None):
+def generate_image(prompt, api_key, resolution, model, input_images=None):
     from google import genai
     from google.genai import types
+    from PIL import Image as PILImage
+    import io
 
     client = genai.Client(api_key=api_key)
 
@@ -110,14 +130,14 @@ def generate_image(prompt, api_key, resolution, input_images=None):
             sys.exit(1)
 
         response = client.models.generate_images(
-            model="imagen-3.0-generate-002",
+            model=model,
             prompt=prompt,
             reference_images=input_images,
             config=config,
         )
     else:
         response = client.models.generate_images(
-            model="imagen-3.0-generate-002",
+            model=model,
             prompt=prompt,
             config=config,
         )
@@ -126,7 +146,15 @@ def generate_image(prompt, api_key, resolution, input_images=None):
         print("Error: No image generated.", file=sys.stderr)
         sys.exit(1)
 
-    return response.generated_images[0].image
+    generated = response.generated_images[0]
+    if hasattr(generated, 'image') and hasattr(generated.image, 'bytes'):
+        image_bytes = generated.image.bytes
+    elif hasattr(generated, 'image'):
+        image_bytes = generated.image
+    else:
+        image_bytes = generated
+
+    return PILImage.open(io.BytesIO(image_bytes))
 
 
 def compress_image(image, max_size_mb=10.0):
@@ -150,6 +178,14 @@ def compress_image(image, max_size_mb=10.0):
     return PILImage.open(buffer)
 
 
+def create_error_image(error_msg):
+    from PIL import Image as PILImage, ImageDraw
+    img = PILImage.new('RGB', (512, 512), color=(30, 30, 30))
+    d = ImageDraw.Draw(img)
+    d.text((20, 200), "GENERATION FAILED", fill=(255, 50, 50))
+    d.text((20, 230), str(error_msg)[:200], fill=(200, 200, 200))
+    return img
+
 def main():
     args = parse_args()
 
@@ -163,23 +199,38 @@ def main():
     if input_images:
         print(f"Using {len(input_images)} input image(s) for composition/editing")
 
-    image = generate_image(
-        prompt=args.prompt,
-        api_key=api_key,
-        resolution=args.resolution,
-        input_images=input_images
-    )
-
-    if args.compress:
-        image = compress_image(image, args.max_size)
-
     output_path = Path(args.filename)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    image.save(output_path, format="PNG")
+    try:
+        image = generate_image(
+            prompt=args.prompt,
+            api_key=api_key,
+            resolution=args.resolution,
+            model=args.model,
+            input_images=input_images
+        )
 
-    abs_path = output_path.resolve()
-    print(f"Image saved to: {abs_path}")
+        if args.compress:
+            image = compress_image(image, args.max_size)
+            
+        image.save(output_path, format="PNG")
+        print(f"Image saved to: {output_path.resolve()}")
+        
+    except Exception as e:
+        error_msg = f"Error: {str(e)}"
+        print(error_msg, file=sys.stderr)
+        
+        # Create error placeholder image
+        print("Generating error placeholder image...", file=sys.stderr)
+        error_img = create_error_image(error_msg)
+        error_img.save(output_path, format="PNG")
+        print(f"Error placeholder saved to: {output_path.resolve()}")
+
+    # Output MEDIA line regardless of success/failure (as long as file exists)
+    # if output_path.exists():
+    #     print(f"\nMEDIA:{output_path}")
+
 
 
 if __name__ == "__main__":
