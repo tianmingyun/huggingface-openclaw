@@ -29,6 +29,14 @@ Use the bundled script to generate or edit images.
 uv run {baseDir}/scripts/generate_image.py --prompt "your image description" --filename "output.png" --resolution 1K
 ```
 
+## Available Models
+
+The model is configured via the `IMAGE_MODEL` environment variable.
+
+- Default: `imagen-4.0-generate-001` (if not set)
+
+You can override this by setting `IMAGE_MODEL` in your environment or `openclaw.json`.
+
 ## Edit (single image)
 
 ```bash
@@ -48,21 +56,25 @@ uv run {baseDir}/scripts/generate_image.py --prompt "combine these into one scen
 
 ## Output Format (IMPORTANT)
 
-After generating an image, you MUST output a `MEDIA:` line to send the image to the chat:
+After generating an image, you MUST send it to the user using the message tool:
 
-```
-MEDIA:./output.png
-```
+1. Copy the image to the allowed media directory first:
+   ```
+   cp output.png /tmp/output.png
+   ```
+
+2. Use the message tool to send it:
+   ```
+   message channel=feishu target=<user_id> message="Here is your image:" media=/tmp/output.png
+   ```
 
 **Rules:**
-- Use **relative path** starting with `./` (e.g., `MEDIA:./image.png`)
-- The path is relative to your workspace directory
-- NEVER use absolute paths like `/home/node/...`
-- Output this line on its own line after describing the generated image
+- Do NOT output `MEDIA:` lines manually
+- Do NOT use Markdown image links `![image](...)` for external URLs
+- You MUST use the `message` tool with `media` parameter pointing to `/tmp/` path
 
 ## Notes
 
 - Resolutions: `1K` (default), `2K`, `4K`.
 - Use timestamps in filenames: `yyyy-mm-dd-hh-mm-ss-name.png`.
 - Start with 1K for fast iteration, then switch to 2K or 4K for final outputs.
-- Always output `MEDIA:./filename.png` to send the image to the chat.
